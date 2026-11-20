@@ -14,6 +14,8 @@ verifies the key behaviours required by the task:
  7. mid-transfer disconnect -> error; next acquisition recovers and returns the
     CURRENT waveform (no stale bytes leaking into later orders)
  8. slow instrument responses do not block the web API
+ 9. probe calibration interval analysis: feasible envelope, single feasible
+    parameter, conflicting constraints, CSV content/status, validation errors
 
 Usage: python3 tests/selftest.py
 """
@@ -359,6 +361,137 @@ def main() -> int:
         a8b = job["id"]
         job = wait_status(base, a8b, ("done", "error"), 10)
         check(job["status"] == "done", "final acquisition completes")
+
+        # ---- 9. probe calibration interval analysis ------------------------
+        print("[9] probe calibration interval analysis API")
+        # three completed records: standard/calibration on CH1, test on CH1,
+        # plus a CH2 record for the channel-mismatch checks
+        ids = {}
+        for key, ch in (("std", 1), ("cal", 1), ("test", 1), ("other_ch", 2)):
+            _, job = http_json("POST", base, "/api/acquisitions", {"channel": ch})
+            aid = job["id"]
+            job = wait_status(base, aid, ("done", "error"), 10)
+            check(job["status"] == "done", f"[9] record {key} #{aid} completed")
+            ids[key] = aid
+
+        def analysis(body):
+            return http_json("POST", base, "/api/probe-analysis", body)
+
+        base_req = {
+            "standard_id": ids["std"],
+            "calibration_id": ids["cal"],
+            "test_id": ids["test"],
+            "standard_start": 0,
+            "calibration_start": 0,
+            "pair_count": 8,
+            "gain_min": 0.5,
+            "gain_max": 2.0,
+            "offset_min": -5.0,
+            "offset_max": 5.0,
+            "tolerance": 0.5,
+        }
+
+        # 9.1 feasible analysis: identical records -> g=1, b=0 feasible
+        status, payload = analysis(base_req)
+        check(status == 200 and payload["feasible"],
+              f"[9.1] feasible analysis (status={status})")
+        check(len(payload["rows"]) == POINTS, "[9.1] one result row per test sample")
+        check(len(payload["vertices"]) >= 1, "[9.1] feasible polygon has vertices")
+        check(all(
+            abs(v["gain"] * 1.0 + v["offset"] - 1.0) <= 0.5 + 1e-6
+            for v in payload["vertices"]
+        ), "[9.1] every vertex satisfies the pairing tolerance")
+        check(all(v["gain"] > 0 for v in payload["vertices"]),
+              "[9.1] only positive gains appear in the feasible set")
+        in_range = [r for r in payload["rows"] if r["in_range"]]
+        check(len(in_range) > 0 and
+              all(r["voltage_min_v"] is not None and r["voltage_max_v"] is not None
+                  and r["voltage_min_v"] <= r["voltage_max_v"] for r in in_range),
+              "[9.1] in-range rows carry ordered min/max bounds")
+        rng = payload["probe_voltage_range_v"]
+        check(rng[0] <= rng[1], "[9.1] calibrated probe span reported")
+
+        # 9.2 single feasible parameter still returns results
+        single_req = dict(base_req, pair_count=2, tolerance=0.0,
+                          gain_min=1.0, gain_max=1.0,
+                          offset_min=0.0, offset_max=0.0)
+        status, payload = analysis(single_req)
+        check(status == 200 and payload["feasible"],
+              "[9.2] single feasible parameter (g=1,b=0) accepted")
+        check(all(
+            math.isclose(v["gain"], 1.0, abs_tol=1e-8)
+            and math.isclose(v["offset"], 0.0, abs_tol=1e-8)
+            for v in payload["vertices"]
+        ), "[9.2] feasible set collapses onto (g=1, b=0)")
+
+        # 9.3 conflicting constraints -> feasible=false, message, empty rows
+        conflict_req = dict(base_req, tolerance=0.0,
+                            gain_min=2.0, gain_max=3.0,
+                            offset_min=-0.01, offset_max=0.01)
+        status, payload = analysis(conflict_req)
+        check(status == 200 and payload["feasible"] is False
+              and payload["rows"] == [] and payload["message"],
+              "[9.3] conflict reported with feasible=false and no rows")
+        status, raw = http("POST", base, "/api/probe-analysis/csv", conflict_req)
+        check(status == 409, "[9.3] CSV download refused (409) on conflict")
+
+        # 9.4 CSV of a feasible analysis: header, rows, empty out-of-range cells
+        status, raw = http("POST", base, "/api/probe-analysis/csv", base_req)
+        check(status == 200, f"[9.4] analysis CSV downloadable (HTTP {status})")
+        csv_lines = raw.decode().strip().split("\n")
+        check(csv_lines[0] == "sample_index,time_s,voltage_min_v,voltage_max_v,status",
+              "[9.4] CSV header")
+        check(len(csv_lines) == POINTS + 1, "[9.4] one CSV row per test sample")
+        oor_lines = [ln for ln in csv_lines[1:] if ln.endswith("out_of_range")]
+        inr_lines = [ln for ln in csv_lines[1:] if ln.endswith("in_range")]
+        check(len(oor_lines) + len(inr_lines) == POINTS,
+              "[9.4] every row tagged in_range/out_of_range")
+        if oor_lines:
+            cells = oor_lines[0].split(",")
+            check(cells[2] == "" and cells[3] == "",
+                  "[9.4] out-of-range rows leave voltage bounds empty")
+        check(all(len(ln.split(",")) == 5 for ln in inr_lines[:5]),
+              "[9.4] in-range rows carry both voltage bounds")
+
+        # 9.5 validation errors
+        bad_channel = dict(base_req, test_id=ids["other_ch"])
+        status, payload = analysis(bad_channel)
+        check(status == 400 and "通道" in payload["detail"],
+              f"[9.5] channel mismatch rejected ({status})")
+        missing = dict(base_req, test_id=999999)
+        status, _ = analysis(missing)
+        check(status == 404, "[9.5] unknown record -> 404")
+        dup = dict(base_req, calibration_id=ids["std"], test_id=ids["test"])
+        status, payload = analysis(dup)
+        check(status == 400 and "不同" in payload["detail"],
+              "[9.5] duplicated record selection rejected")
+        bad_pairs = dict(base_req, pair_count=100)
+        status, _ = analysis(bad_pairs)
+        check(status == 422, "[9.5] pair_count outside 2..64 -> 422")
+        bad_gain = dict(base_req, gain_min=-1.0)
+        status, _ = analysis(bad_gain)
+        check(status == 422, "[9.5] non-positive gain -> 422")
+        bad_tol = dict(base_req, tolerance=-0.1)
+        status, _ = analysis(bad_tol)
+        check(status == 422, "[9.5] negative tolerance -> 422")
+        overrun = dict(base_req, standard_start=POINTS - 2)
+        status, payload = analysis(overrun)
+        check(status == 400 and "样本不足" in payload["detail"],
+              "[9.5] start index overrun -> 400 with explanation")
+        # an incomplete record cannot be used
+        _, job = http_json("POST", base, "/api/acquisitions", {"channel": 1})
+        pend = job["id"]
+        for _ in range(20):
+            job = http_json("GET", base, f"/api/acquisitions/{pend}")[1]
+            if job["status"] != "queued":
+                break
+            time.sleep(0.1)
+        http_json("POST", base, f"/api/acquisitions/{pend}/cancel")
+        wait_status(base, pend, ("cancelled", "error", "done"), 8)
+        not_done = dict(base_req, test_id=pend)
+        status, payload = analysis(not_done)
+        check(status == 409 and "尚未完成" in payload["detail"],
+              "[9.5] non-completed record -> 409")
 
     finally:
         for proc in (web_proc, sim_proc):

@@ -26,12 +26,14 @@ cd web && SCOPE_PORT=5025 python3 -m uvicorn app.main:app --port 8000
 
 ```
 simulator/scpi_simulator.py   SCPI/TCP 示波器模拟器（纯标准库）
-web/app/main.py               FastAPI 路由（采集/取消/状态/CSV）
+web/app/main.py               FastAPI 路由（采集/取消/状态/CSV/探头校验分析）
 web/app/manager.py            采集队列 worker：仪器串行访问、取消语义
 web/app/instrument.py         仪器客户端：单轮单连接、5s 超时、IEEE488.2 块解析
+web/app/probe.py              探头校验区间分析（半平面可行域，纯标准库、可单测）
 web/app/db.py                 SQLite 持久化
-web/app/static/index.html     操作网页（中文）
+web/app/static/index.html     操作网页（中文，含探头校验分析工具）
 tests/selftest.py             端到端自测（启动两端真实进程）
+tests/test_probe.py           探头分析纯算法单测（无需服务器/第三方包）
 docker-compose.yml            一键启动两端
 ```
 
@@ -70,6 +72,31 @@ docker-compose.yml            一键启动两端
 
 也可用环境变量预设（见 `docker-compose.yml` 注释）。
 
+## 探头校验区间分析（波形页工具）
+
+探头校验存在误差时，用本工具估计待测电压可能落入的范围。在波形页
+「探头校验区间分析」卡片中：
+
+1. 选择同一参考脉冲的**标准记录**与**探头校验记录**（二者采样间隔须相同），
+   再选择同一探头、同一通道的**待测记录**；三条记录都必须是已完成状态。
+2. 分别填写标准/校验记录的起始样本号（从 0 开始），按顺序配对 2～64 点。
+3. 三条记录各自沿用自身原标定（`raw × volt_scale + volt_offset`）换算电压。
+4. 输入正增益闭区间 `[g_min, g_max]`（端点均 > 0）、零偏闭区间
+   `[b_min, b_max]` 与非负电压容差 `tol`。整段待测波形共用一组校正参数
+   `v校正 = g × 探头读数 + b`，且每个配对点都须满足
+   `|g·p_i + b − s_i| ≤ tol`。
+5. 可行参数集是 (g, b) 平面上由半平面约束交出的凸多边形（`web/app/probe.py`，
+   枚举约束边界两两交点求顶点）。对每个待测样本，线性式 `g·v + b` 在凸多边形
+   上的最小/最大值在顶点取得，据此给出校正电压下界与上界；仅有一组可行参数
+   （可行域退化为点）时上下界相等，照常出结果。
+6. 待测样本的探头读数若超出**配对段校验记录实际覆盖的探头电压范围**
+   `[min p_i, max p_i]`，标为 `out_of_range`（超范围），上下界留空；
+   边界点视为在范围内。
+7. 约束互相冲突（无可行参数）时接口返回 `feasible=false` 与冲突说明，
+   网页清空旧结果并提示，CSV 接口返回 409。
+8. 结果可下载 CSV，列：`sample_index,time_s,voltage_min_v,voltage_max_v,status`；
+   样本时间用待测记录自身的采样间隔计算。
+
 ## API
 
 | 方法 | 路径 | 说明 |
@@ -81,6 +108,23 @@ docker-compose.yml            一键启动两端
 | GET | `/api/acquisitions/{id}` | 单个采集状态 |
 | POST | `/api/acquisitions/{id}/cancel` | 取消（排队/采集中均可） |
 | GET | `/api/acquisitions/{id}/csv` | 下载电压-时序 CSV（仅完成后） |
+| POST | `/api/probe-analysis` | 探头校验区间分析（JSON，冲突时 200 + `feasible:false`） |
+| POST | `/api/probe-analysis/csv` | 同一分析的 CSV 下载（冲突时 409） |
+
+`/api/probe-analysis` 请求体：
+
+```json
+{
+  "standard_id": 1, "calibration_id": 2, "test_id": 3,
+  "standard_start": 0, "calibration_start": 0, "pair_count": 8,
+  "gain_min": 0.9, "gain_max": 1.1,
+  "offset_min": -0.5, "offset_max": 0.5, "tolerance": 0.05
+}
+```
+
+校验规则（违例返回 400/404/409/422）：三条记录须存在且 `done`、互不相同；
+校验与待测记录通道一致；标准与校验记录采样间隔一致；起始号 + 配对点数不得
+超出记录长度；增益端点为正、区间端点有序、容差非负、配对点数 2～64。
 
 状态机：`queued → running → done`，取消路径 `queued → cancelled`、
 `running → cancelling → cancelled`，失败为 `error`（含错误信息）。
@@ -88,12 +132,14 @@ docker-compose.yml            一键启动两端
 ## 自测
 
 ```bash
-python3 tests/selftest.py
+python3 tests/selftest.py     # 端到端：模拟器 + Web 真实进程（含探头分析 API）
+python3 tests/test_probe.py   # 探头分析纯算法单测（无需启动服务、无第三方依赖）
 ```
 
-脚本拉起真实模拟器与 Web 进程，覆盖：正常采集与 CSV 数值校验（含每通道参数）、
+端到端脚本拉起真实模拟器与 Web 进程，覆盖：正常采集与 CSV 数值校验（含每通道参数）、
 样本含换行字节、排队取消零命令、采集中取消的受理/上报时序、5 秒超时、
-中途断连后恢复、断连后新采集拿到当前波形（无陈旧字节）、慢响应下网页 API 延迟。
+中途断连后恢复、断连后新采集拿到当前波形（无陈旧字节）、慢响应下网页 API 延迟，
+以及探头校验分析的可行包络、单点可行域、约束冲突、CSV 内容与全部参数校验错误。
 
 ## 已验证 / 未完成
 

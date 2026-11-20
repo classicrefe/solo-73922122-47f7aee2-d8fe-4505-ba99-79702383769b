@@ -15,9 +15,12 @@
   main { max-width: 1100px; margin: 20px auto; padding: 0 16px; }
   .card { background: #fff; border-radius: 8px; padding: 16px 20px;
           box-shadow: 0 1px 3px rgba(0,0,0,.08); margin-bottom: 16px; }
+  .card h2 { margin: 0 0 12px; font-size: 15px; font-weight: 600; color: #1f3a5f; }
   .controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
-  select, button { font-size: 14px; padding: 8px 14px; border-radius: 6px;
+  select, button, input { font-size: 14px; padding: 8px 14px; border-radius: 6px;
                    border: 1px solid #c8d0d8; background: #fff; cursor: pointer; }
+  input { cursor: text; }
+  input.num { width: 120px; }
   button.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
   button.primary:disabled { background: #9db8e0; border-color: #9db8e0; cursor: default; }
   button.danger { background: #d64545; border-color: #d64545; color: #fff; }
@@ -38,8 +41,26 @@
   .err { color: #b91c1c; font-size: 12px; max-width: 220px; overflow: hidden;
          text-overflow: ellipsis; }
   #toast { position: fixed; top: 14px; right: 14px; background: #333; color: #fff;
-           padding: 10px 16px; border-radius: 6px; font-size: 13px; display: none; }
+           padding: 10px 16px; border-radius: 6px; font-size: 13px; display: none;
+           z-index: 10; max-width: 60vw; }
   .mono { font-family: ui-monospace, Consolas, monospace; }
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+           gap: 10px 24px; }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label { font-size: 12px; color: #556; font-weight: 600; }
+  .field select, .field input { width: 100%; }
+  .hint { font-size: 12px; color: #789; line-height: 1.6; }
+  .banner { border-radius: 6px; padding: 10px 14px; font-size: 13px; margin-top: 12px;
+            display: none; }
+  .banner.ok { display: block; background: #dcfce7; color: #15803d; border: 1px solid #86efac; }
+  .banner.bad { display: block; background: #fee2e2; color: #b91c1c; border: 1px solid #fca5a5; }
+  .banner.info { display: block; background: #e8f0fe; color: #1d4ed8; border: 1px solid #bdd2f7; }
+  .tag-out { background: #ffedd5; color: #c2410c; }
+  .tag-in  { background: #dcfce7; color: #15803d; }
+  .scrollbox { max-height: 360px; overflow: auto; margin-top: 12px; border: 1px solid #e6eaee;
+               border-radius: 6px; }
+  .scrollbox table { font-size: 12px; }
+  .muted { color: #889; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -62,6 +83,83 @@
       </span>
     </div>
   </div>
+
+  <div class="card">
+    <h2>探头校验区间分析</h2>
+    <p class="hint">
+      选取同一参考脉冲的<b>标准记录</b>与<b>探头校验记录</b>（二者采样间隔须相同），
+      再选同一探头、同一通道的<b>待测记录</b>；三条记录均须已完成。分别填写标准与校验
+      记录的起始样本号（从 0 开始），按顺序配对 2～64 点。各记录沿用自身原标定换算电压。
+      校正模型 <span class="mono">v校正 = 增益 g × 探头读数 + 零偏 b</span>，整段共用一组
+      参数；每个校正值与配对标准值之差都须落在 ±容差 内。对每个待测样本求所有可行参数下
+      的最低/最高校正电压；超出校验所用探头电压范围的样本标为超范围并留空上下界。
+    </p>
+    <div class="grid2">
+      <div class="field">
+        <label>标准记录（参考脉冲）</label>
+        <select id="paStandard"></select>
+      </div>
+      <div class="field">
+        <label>探头校验记录</label>
+        <select id="paCalibration" onchange="renderProbeSelectors(allJobs)"></select>
+      </div>
+      <div class="field">
+        <label>待测记录（须与校验记录同探头同通道）</label>
+        <select id="paTest"></select>
+      </div>
+      <div class="field">
+        <label>配对点数（2～64）</label>
+        <input class="num" id="paPairCount" type="number" min="2" max="64" step="1" value="8">
+      </div>
+      <div class="field">
+        <label>标准记录起始样本号</label>
+        <input class="num" id="paStdStart" type="number" min="0" step="1" value="0">
+      </div>
+      <div class="field">
+        <label>校验记录起始样本号</label>
+        <input class="num" id="paCalStart" type="number" min="0" step="1" value="0">
+      </div>
+      <div class="field">
+        <label>增益闭区间 [g_min, g_max]（均 &gt; 0）</label>
+        <div class="controls" style="gap:6px">
+          <input class="num" id="paGainMin" type="number" step="any" value="0.9">
+          <input class="num" id="paGainMax" type="number" step="any" value="1.1">
+        </div>
+      </div>
+      <div class="field">
+        <label>零偏闭区间 [b_min, b_max] (V)</label>
+        <div class="controls" style="gap:6px">
+          <input class="num" id="paOffsetMin" type="number" step="any" value="-0.5">
+          <input class="num" id="paOffsetMax" type="number" step="any" value="0.5">
+        </div>
+      </div>
+      <div class="field">
+        <label>电压容差 (V，非负)</label>
+        <input class="num" id="paTolerance" type="number" min="0" step="any" value="0.05">
+      </div>
+    </div>
+    <div class="controls" style="margin-top:14px">
+      <button class="primary" id="paRunBtn" onclick="runProbeAnalysis()">计算校正电压区间</button>
+      <button id="paCsvBtn" onclick="downloadProbeCsv()" disabled>下载结果 CSV</button>
+      <span class="muted" id="paHint"></span>
+    </div>
+    <div id="paBanner" class="banner"></div>
+    <div id="paResultWrap" style="display:none">
+      <div class="scrollbox">
+        <table>
+          <thead>
+            <tr>
+              <th>样本号</th><th>样本时间 (s)</th><th>探头读数 (V)</th>
+              <th>校正电压下界 (V)</th><th>校正电压上界 (V)</th><th>覆盖状态</th>
+            </tr>
+          </thead>
+          <tbody id="paRows"></tbody>
+        </table>
+      </div>
+      <p class="muted" id="paPreviewNote"></p>
+    </div>
+  </div>
+
   <div class="card">
     <table>
       <thead>
@@ -81,6 +179,10 @@ const STATUS_TEXT = {
   queued: '排队中', running: '采集中', cancelling: '取消中',
   done: '完成', cancelled: '已取消', error: '错误'
 };
+let allJobs = [];
+let lastAnalysis = null;   // latest feasible analysis request + result
+const PA_PREVIEW_ROWS = 100;
+
 function toast(msg) {
   const t = document.getElementById('toast');
   t.textContent = msg; t.style.display = 'block';
@@ -153,10 +255,161 @@ function render(jobs) {
     </tr>`;
   }).join('');
 }
+
+// ---- probe calibration interval analysis ---------------------------------
+function optionLabel(j) {
+  return `#${j.id} · CHANnel${j.channel} · Δt=${fmt(j.sample_interval, 2)}s · ${fmtTime(j.created_at)}`;
+}
+function fillSelect(el, jobs, keepId) {
+  const prev = keepId !== undefined ? keepId : (el.value ? Number(el.value) : null);
+  if (!jobs.length) {
+    el.innerHTML = '<option value="">（无已完成记录）</option>';
+    return;
+  }
+  el.innerHTML = jobs.map(j =>
+    `<option value="${j.id}"${String(prev) === String(j.id) ? ' selected' : ''}>${optionLabel(j)}</option>`
+  ).join('');
+  if (prev && !jobs.some(j => String(j.id) === String(prev))) el.selectedIndex = 0;
+}
+function renderProbeSelectors(jobs) {
+  const done = jobs.filter(j => j.status === 'done' && j.has_samples)
+                   .sort((a, b) => b.id - a.id);
+  const calEl = document.getElementById('paCalibration');
+  const calId = Number(calEl.value);
+  fillSelect(document.getElementById('paStandard'), done);
+  fillSelect(calEl, done);
+  // test record: same channel as the chosen calibration record, if any
+  const calJob = done.find(j => j.id === calId);
+  const testPool = calJob ? done.filter(j => j.channel === calJob.channel) : done;
+  fillSelect(document.getElementById('paTest'), testPool);
+  const stdJob = done.find(j => j.id === Number(document.getElementById('paStandard').value));
+  const hint = document.getElementById('paHint');
+  if (stdJob && calJob) {
+    hint.textContent = Math.abs(stdJob.sample_interval - calJob.sample_interval) <
+        1e-9 * Math.max(1, Math.abs(stdJob.sample_interval), Math.abs(calJob.sample_interval))
+      ? '标准/校验记录采样间隔一致 ✓'
+      : '⚠ 标准与校验记录采样间隔不同，提交将被拒绝';
+  } else {
+    hint.textContent = '';
+  }
+}
+function readProbeForm() {
+  const num = id => Number(document.getElementById(id).value);
+  return {
+    standard_id: Number(document.getElementById('paStandard').value),
+    calibration_id: Number(document.getElementById('paCalibration').value),
+    test_id: Number(document.getElementById('paTest').value),
+    standard_start: num('paStdStart'),
+    calibration_start: num('paCalStart'),
+    pair_count: num('paPairCount'),
+    gain_min: num('paGainMin'),
+    gain_max: num('paGainMax'),
+    offset_min: num('paOffsetMin'),
+    offset_max: num('paOffsetMax'),
+    tolerance: num('paTolerance')
+  };
+}
+function showBanner(kind, text) {
+  const el = document.getElementById('paBanner');
+  el.className = 'banner ' + kind;
+  el.textContent = text;
+}
+function clearProbeResult() {
+  lastAnalysis = null;
+  document.getElementById('paCsvBtn').disabled = true;
+  document.getElementById('paResultWrap').style.display = 'none';
+  document.getElementById('paRows').innerHTML = '';
+}
+function renderProbeResult(payload, req) {
+  const banner = document.getElementById('paBanner');
+  if (!payload.feasible) {
+    clearProbeResult();
+    banner.className = 'banner bad';
+    banner.textContent = '约束冲突：' + payload.message;
+    return;
+  }
+  lastAnalysis = {req, payload};
+  document.getElementById('paCsvBtn').disabled = false;
+  banner.className = 'banner ok';
+  const [pmin, pmax] = payload.probe_voltage_range_v;
+  banner.textContent =
+    payload.message +
+    `　校验所用探头电压范围：[${pmin.toExponential(4)}, ${pmax.toExponential(4)}] V，` +
+    `可行域顶点数：${payload.vertices.length}`;
+  const rows = payload.rows;
+  const shown = rows.slice(0, PA_PREVIEW_ROWS);
+  document.getElementById('paRows').innerHTML = shown.map(r => {
+    const status = r.in_range
+      ? '<span class="badge tag-in">在范围内</span>'
+      : '<span class="badge tag-out">超范围</span>';
+    return `<tr>
+      <td class="mono">${r.index}</td>
+      <td class="mono">${r.time_s.toExponential(4)}</td>
+      <td class="mono">${r.probe_voltage_v.toExponential(4)}</td>
+      <td class="mono">${r.in_range ? r.voltage_min_v.toExponential(4) : ''}</td>
+      <td class="mono">${r.in_range ? r.voltage_max_v.toExponential(4) : ''}</td>
+      <td>${status}</td>
+    </tr>`;
+  }).join('');
+  document.getElementById('paResultWrap').style.display = 'block';
+  document.getElementById('paPreviewNote').textContent =
+    `预览前 ${shown.length} 行（共 ${rows.length} 行；在范围内 ${payload.in_range_count} 点、` +
+    `超范围 ${payload.out_of_range_count} 点），完整结果请下载 CSV。`;
+}
+async function runProbeAnalysis() {
+  const req = readProbeForm();
+  if (!req.standard_id || !req.calibration_id || !req.test_id) {
+    showBanner('bad', '请先选择三条已完成记录。');
+    clearProbeResult();
+    return;
+  }
+  const btn = document.getElementById('paRunBtn');
+  btn.disabled = true;
+  try {
+    const payload = await api('/api/probe-analysis', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(req)
+    });
+    renderProbeResult(payload, req);
+  } catch (e) {
+    clearProbeResult();
+    showBanner('bad', '分析失败：' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+async function downloadProbeCsv() {
+  if (!lastAnalysis) return;
+  try {
+    const r = await fetch('/api/probe-analysis/csv', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(lastAnalysis.req)
+    });
+    if (!r.ok) {
+      let detail = r.status;
+      try { detail = (await r.json()).detail || detail; } catch (e) {}
+      throw new Error(detail);
+    }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `probe_analysis_std${lastAnalysis.req.standard_id}_cal${lastAnalysis.req.calibration_id}_test${lastAnalysis.req.test_id}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) { toast('CSV 下载失败: ' + e.message); }
+}
+
 async function refresh() {
   try {
     const jobs = await api('/api/acquisitions');
+    allJobs = jobs;
     render(jobs);
+    renderProbeSelectors(jobs);
   } catch (e) { /* 暂时性失败，下个周期重试 */ }
 }
 async function loadHealth() {
